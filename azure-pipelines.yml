@@ -1,0 +1,115 @@
+# ASP.NET Pipeline avec déploiement Render automatique
+trigger:
+- master
+
+pool: 'Default'
+
+variables:
+  # 1. RÉFÉRENCER LE GROUPE DE VARIABLES
+  - group: Render-Deploy  # ← Ça importe github-token
+  
+  # 2. Variables de build
+  - name: solution
+    value: '**/*.sln'
+  - name: buildPlatform
+    value: 'Any CPU'
+  - name: buildConfiguration
+    value: 'Release'
+
+steps:
+# 1. Début
+- script: |
+    echo "=== DÉBUT PIPELINE ==="
+    echo "Build: $(Build.BuildNumber)"
+  displayName: '📊 Début pipeline'
+
+# 2. Build .NET
+- task: NuGetToolInstaller@1
+- task: NuGetCommand@2
+  inputs:
+    restoreSolution: '$(solution)'
+
+- task: VSBuild@1
+  inputs:
+    solution: '$(solution)'
+    msbuildArgs: '/p:DeployOnBuild=true /p:WebPublishMethod=Package /p:PackageAsSingleFile=true /p:SkipInvalidConfigurations=true /p:PackageLocation="$(build.artifactStagingDirectory)"'
+    platform: '$(buildPlatform)'
+    configuration: '$(buildConfiguration)'
+
+# 3. Tests
+- task: VSTest@2
+  inputs:
+    platform: '$(buildPlatform)'
+    configuration: '$(buildConfiguration)'
+
+# 4. Message succès
+- script: echo "✅ BUILD RÉUSSI"
+  displayName: '🎉 Build terminé'
+
+- task: PowerShell@2
+  displayName: '📤 Force Push vers GitHub (NO MERGE)'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== FORCE PUSH VERS GITHUB ==="
+      
+      $token = "$env:GITHUB_TOKEN"
+      Write-Host "Token: ✓ ($($token.Length) chars)"
+      
+      # 1. Créer un dossier propre SANS historique
+      $tempDir = "$env:TEMP\github-clean-$(Get-Random)"
+      New-Item -ItemType Directory -Path $tempDir -Force
+      Set-Location $tempDir
+      Write-Host "Dossier temporaire: $tempDir"
+      
+      # 2. Initialiser un repo VIDE
+      git init
+      git config user.email "ci@azure.com"
+      git config user.name "Azure DevOps"
+      
+      # 3. Copier UNIQUEMENT les fichiers de ton projet (pas les .git, etc.)
+      $sourceDir = "$(Build.SourcesDirectory)"
+      Write-Host "Copie des fichiers depuis: $sourceDir"
+      
+      # Copier récursivement en excluant les dossiers systèmes
+      Get-ChildItem -Path $sourceDir -Force | 
+        Where-Object { 
+          $_.Name -notmatch '^\.(git|vs)$' -and
+          $_.Name -notin @('bin', 'obj', 'packages', 'node_modules', '.vs', '.git')
+        } |
+        ForEach-Object {
+          if ($_.PSIsContainer) {
+            Copy-Item -Path $_.FullName -Destination $tempDir -Recurse -Force
+          } else {
+            Copy-Item -Path $_.FullName -Destination $tempDir -Force
+          }
+        }
+      
+      # 4. Ajouter tout et commiter
+      git add .
+      git commit -m "🚀 Déploiement Azure DevOps - Build $(Build.BuildNumber) [skip ci]"
+      
+      # 5. Ajouter remote GitHub
+      $githubUrl = "https://${token}@github.com/chamseddinemhedhbi4766-max/CmsShoppingCart.git"
+      git remote add origin $githubUrl
+      
+      # 6. PUSH FORCE SANS ESSAYER DE PULL D'ABORD
+      Write-Host "Force push vers GitHub (écrase tout)..."
+      git push origin master --force
+      
+      if ($LASTEXITCODE -eq 0) {
+          Write-Host ""
+          Write-Host "🎉🎉🎉 SUCCÈS COMPLET ! 🎉🎉🎉"
+          Write-Host "✅ GitHub mis à jour avec la version Azure DevOps"
+          Write-Host "✅ Render va déployer IMMÉDIATEMENT"
+          Write-Host ""
+      } else {
+          Write-Error "❌ Échec du push"
+          exit 1
+      }
+      
+      # Nettoyage
+      Set-Location "C:\"
+      Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+  env:
+    GITHUB_TOKEN: $(github-token)
